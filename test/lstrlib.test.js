@@ -219,6 +219,43 @@ test('string.format of floats follows C, not JavaScript', () => {
 });
 
 
+test('string.format of integers follows C, including the # flag', () => {
+    let L = lauxlib.luaL_newstate();
+    if (!L) throw Error("failed to create lua state");
+
+    let luaCode = `
+        local function eq(got, want)
+            assert(got == want, "got " .. got .. ", wanted " .. want)
+        end
+        -- '#' spells out the base; sprintf-js had no such flag and threw
+        eq(string.format("%#x", 255), "0xff")
+        eq(string.format("%#X", 255), "0XFF")
+        eq(string.format("%#o", 255), "0377")
+        eq(string.format("%#x", 0), "0", "no prefix on zero")
+        eq(string.format("%#o", 0), "0")
+        eq(string.format("%-#10x", 255), "0xff      ")
+        -- a precision on an integer is a minimum number of digits, and it
+        -- turns off zero padding
+        eq(string.format("%.5d", 42), "00042")
+        eq(string.format("%.5d", -42), "-00042")
+        eq(string.format("%8.5x", 255), "   000ff")
+        eq(string.format("%08.5x", 255), "   000ff")
+        eq(string.format("%.0d", 0), "", "zero with precision zero prints nothing")
+        eq(string.format("%.0d", 1), "1")
+        -- the other conversions and flags
+        eq(string.format("%o", 8), "10")
+        eq(string.format("%u", 255), "255")
+        eq(string.format("%05d", -255), "-0255")
+        eq(string.format("%+d", 255), "+255")
+        eq(string.format("% d", 255), " 255")
+        eq(string.format("%-5d", 42), "42   ")
+    `;
+    lualib.luaL_openlibs(L);
+    expect(lauxlib.luaL_loadstring(L, to_luastring(luaCode))).toBe(lua.LUA_OK);
+    lua.lua_call(L, 0, 0);
+});
+
+
 test('tostring of a float matches LUA_NUMBER_FMT', () => {
     let L = lauxlib.luaL_newstate();
     if (!L) throw Error("failed to create lua state");

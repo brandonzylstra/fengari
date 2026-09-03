@@ -352,6 +352,44 @@ const readformat = function(form) {
     return spec;
 };
 
+/*
+** The integer conversions. sprintf-js has no '#' flag at all and throws a
+** JS SyntaxError when it meets one, which escaped as something that was not
+** a Lua error at all.
+*/
+const formatint = function(form, conv, n) {
+    let spec = readformat(form);
+    let sign = "";
+    let prefix = "";
+    let digits;
+    if (conv === "d" || conv === "i") {  /* the only signed conversions */
+        sign = n < 0 ? "-" : (spec.sign ? "+" : (spec.space ? " " : ""));
+        digits = String(n < 0 ? -n : n);
+    } else {  /* the rest read the integer as unsigned */
+        let base = conv === "o" ? 8 : (conv === "u" ? 10 : 16);
+        digits = (n < 0 ? n >>> 0 : n).toString(base);
+        if (conv === "X") digits = digits.toUpperCase();
+    }
+    if (spec.prec >= 0) {  /* a precision is a minimum number of digits */
+        if (n === 0 && spec.prec === 0)
+            digits = "";
+        else if (digits.length < spec.prec)
+            digits = "0".repeat(spec.prec - digits.length) + digits;
+    }
+    if (spec.alt) {  /* '#' spells out the base */
+        if (n !== 0 && (conv === "x" || conv === "X"))
+            prefix = conv === "x" ? "0x" : "0X";
+        else if (conv === "o" && digits.charAt(0) !== "0")
+            prefix = "0";
+    }
+    let head = sign + prefix;
+    let pad = spec.width - head.length - digits.length;
+    if (pad <= 0) return head + digits;
+    if (spec.left) return head + digits + " ".repeat(pad);
+    if (spec.zero && spec.prec < 0) return head + "0".repeat(pad) + digits;
+    return " ".repeat(pad) + head + digits;
+};
+
 const formatfloat = function(form, conv, x) {
     let spec = readformat(form);
     let upper = conv === "E" || conv === "G";
@@ -414,8 +452,7 @@ const str_format = function(L) {
                 case 'd': case 'i':
                 case 'o': case 'u': case 'x': case 'X': {
                     let n = luaL_checkinteger(L, arg);
-                    addlenmod(form, to_luastring(LUA_INTEGER_FRMLEN, true));
-                    luaL_addstring(b, to_luastring(sprintf(String.fromCharCode(...form), n)));
+                    luaL_addstring(b, to_luastring(formatint(form, String.fromCharCode(strfrmt[i-1]), n)));
                     break;
                 }
                 case 'a': case 'A': {
