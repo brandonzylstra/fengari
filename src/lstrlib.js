@@ -9,6 +9,7 @@ const {
     LUA_NUMBER_FMT,
     LUA_NUMBER_FRMLEN,
     frexp,
+    lua_float2str,
     lua_getlocaledecpoint
 } = require('./luaconf.js');
 const {
@@ -321,6 +322,62 @@ const scanformat = function(L, strfrmt, i, form) {
 /*
 ** add length modifier into formats
 */
+/*
+** Read back the '%...' that 'scanformat' collected. Only the float
+** conversions need this: sprintf-js gets the integer and string ones right,
+** but formats floats by JavaScript's rules rather than C's.
+*/
+const readformat = function(form) {
+    let spec = {
+        left: false, sign: false, space: false, alt: false, zero: false,
+        width: 0, prec: -1
+    };
+    let p = 1;  /* skip the '%' */
+    for (;; p++) {
+        if (form[p] === 45 /* - */) spec.left = true;
+        else if (form[p] === 43 /* + */) spec.sign = true;
+        else if (form[p] === 32 /* space */) spec.space = true;
+        else if (form[p] === 35 /* # */) spec.alt = true;
+        else if (form[p] === 48 /* 0 */) spec.zero = true;
+        else break;
+    }
+    while (isdigit(form[p]))
+        spec.width = spec.width * 10 + (form[p++] - 48);
+    if (form[p] === 46 /* . */) {
+        p++;
+        spec.prec = 0;
+        while (isdigit(form[p]))
+            spec.prec = spec.prec * 10 + (form[p++] - 48);
+    }
+    return spec;
+};
+
+const formatfloat = function(form, conv, x) {
+    let spec = readformat(form);
+    let upper = conv === "E" || conv === "G";
+    let negative = x < 0 || Object.is(x, -0);
+    let body, zeropad, sign;
+    if (x !== x) {  /* NaN prints unsigned, whatever '+' or ' ' asked for */
+        body = upper ? "NAN" : "nan";
+        zeropad = false;  /* C never pads infinities or NaN with zeros */
+        sign = "";
+    } else {
+        if (x === Infinity || x === -Infinity) {
+            body = upper ? "INF" : "inf";
+            zeropad = false;
+        } else {
+            body = lua_float2str(conv, spec.prec < 0 ? 6 : spec.prec, spec.alt, negative ? -x : x);
+            zeropad = spec.zero;
+        }
+        sign = negative ? "-" : (spec.sign ? "+" : (spec.space ? " " : ""));
+    }
+    let pad = spec.width - sign.length - body.length;
+    if (pad <= 0) return sign + body;
+    if (spec.left) return sign + body + " ".repeat(pad);
+    if (zeropad) return sign + "0".repeat(pad) + body;
+    return " ".repeat(pad) + sign + body;
+};
+
 const addlenmod = function(form, lenmod) {
     let l = form.length;
     let lm = lenmod.length;
@@ -369,8 +426,7 @@ const str_format = function(L) {
                 case 'e': case 'E': case 'f':
                 case 'g': case 'G': {
                     let n = luaL_checknumber(L, arg);
-                    addlenmod(form, to_luastring(LUA_INTEGER_FRMLEN, true));
-                    luaL_addstring(b, to_luastring(sprintf(String.fromCharCode(...form), n)));
+                    luaL_addstring(b, to_luastring(formatfloat(form, String.fromCharCode(strfrmt[i-1]), n)));
                     break;
                 }
                 case 'q': {

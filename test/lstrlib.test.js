@@ -165,6 +165,85 @@ test('string.format', () => {
 });
 
 
+test('string.format of floats follows C, not JavaScript', () => {
+    let L = lauxlib.luaL_newstate();
+    if (!L) throw Error("failed to create lua state");
+
+    /* every expectation here was taken from a real lua, not from memory */
+    let luaCode = `
+        local function eq(got, want)
+            assert(got == want, "got " .. got .. ", wanted " .. want)
+        end
+        -- an exponent always has at least two digits, and %g picks the
+        -- exponent form outside 10^-4 .. 10^precision
+        eq(string.format("%e", 123456.0), "1.234560e+05")
+        eq(string.format("%E", 0.5), "5.000000E-01")
+        eq(string.format("%g", 100000.0), "100000")
+        eq(string.format("%g", 1000000.0), "1e+06")
+        eq(string.format("%g", 0.0001), "0.0001")
+        eq(string.format("%g", 0.00001), "1e-05")
+        eq(string.format("%.14g", 1e14), "1e+14")
+        eq(string.format("%.14g", 1e13), "10000000000000")
+        eq(string.format("%.17g", 0.1), "0.10000000000000001")
+        eq(string.format("%g", 0.1 + 0.2), "0.3")
+        eq(string.format("%.17g", 0.1 + 0.2), "0.30000000000000004")
+        -- halfway cases round to even, where JavaScript rounds away from zero
+        eq(string.format("%.0f", 0.5), "0")
+        eq(string.format("%.0f", 1.5), "2")
+        eq(string.format("%.0f", 2.5), "2")
+        eq(string.format("%.0f", 3.5), "4")
+        eq(string.format("%.1f", 0.25), "0.2")
+        eq(string.format("%.1f", 0.75), "0.8")
+        -- infinities and NaN spell out the C way, and NaN takes no sign
+        eq(string.format("%f", math.huge), "inf")
+        eq(string.format("%+g", math.huge), "+inf")
+        eq(string.format("%g", -math.huge), "-inf")
+        eq(string.format("%+f", 0/0), "nan")
+        eq(string.format("%E", math.huge), "INF")
+        eq(string.format("%08.1f", math.huge), "     inf")
+        -- zero keeps its sign, and '#' keeps the point
+        eq(string.format("%g", -0.0), "-0")
+        eq(string.format("%.0f", -0.0), "-0")
+        eq(string.format("%#.0f", 1.0), "1.")
+        eq(string.format("%#g", 123456.0), "123456.")
+        eq(string.format("%#.1g", 123456.0), "1.e+05")
+        -- width, padding and sign flags
+        eq(string.format("%12.4f", 0.5), "      0.5000")
+        eq(string.format("%-12.4f", 0.5), "0.5000      ")
+        eq(string.format("%012.4f", -0.5), "-000000.5000")
+        eq(string.format("% .3f", 0.5), " 0.500")
+    `;
+    lualib.luaL_openlibs(L);
+    expect(lauxlib.luaL_loadstring(L, to_luastring(luaCode))).toBe(lua.LUA_OK);
+    lua.lua_call(L, 0, 0);
+});
+
+
+test('tostring of a float matches LUA_NUMBER_FMT', () => {
+    let L = lauxlib.luaL_newstate();
+    if (!L) throw Error("failed to create lua state");
+
+    let luaCode = `
+        assert(tostring(math.huge) == "inf")
+        assert(tostring(-math.huge) == "-inf")
+        assert(tostring(0/0) == "nan")
+        assert(tostring(-0.0) == "-0.0")
+        assert(tostring(1.0) == "1.0")
+        assert(tostring(100.0) == "100.0")
+        assert(tostring(0.5) == "0.5")
+        assert(tostring(1e14) == "1e+14")
+        assert(tostring(1e13) == "10000000000000.0")
+        assert(tostring(1/3) == "0.33333333333333")
+        assert(tostring(1e-5) == "1e-05")
+        assert("" .. math.huge == "inf")
+        assert("" .. 1.5 == "1.5")
+    `;
+    lualib.luaL_openlibs(L);
+    expect(lauxlib.luaL_loadstring(L, to_luastring(luaCode))).toBe(lua.LUA_OK);
+    lua.lua_call(L, 0, 0);
+});
+
+
 test('string.sub', () => {
     let L = lauxlib.luaL_newstate();
     if (!L) throw Error("failed to create lua state");
