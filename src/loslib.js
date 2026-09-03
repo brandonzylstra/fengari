@@ -77,16 +77,60 @@ const setfield = function(L, key, value) {
     lua_setfield(L, -2, to_luastring(key, true));
 };
 
+const setboolfield = function(L, key, value) {
+    lua_pushboolean(L, value);
+    lua_setfield(L, -2, to_luastring(key, true));
+};
+
+/* Broken-down time accessors. Every one of them reads either the UTC or the
+   local field of 'time' according to 'utc', which is set by the '!' that may
+   lead an 'os.date' format string. */
+const get_sec   = function(time, utc) { return utc ? time.getUTCSeconds()  : time.getSeconds();  };
+const get_min   = function(time, utc) { return utc ? time.getUTCMinutes()  : time.getMinutes();  };
+const get_hour  = function(time, utc) { return utc ? time.getUTCHours()    : time.getHours();    };
+const get_mday  = function(time, utc) { return utc ? time.getUTCDate()     : time.getDate();     };
+const get_mon   = function(time, utc) { return utc ? time.getUTCMonth()    : time.getMonth();    };
+const get_year  = function(time, utc) { return utc ? time.getUTCFullYear() : time.getFullYear(); };
+const get_wday  = function(time, utc) { return utc ? time.getUTCDay()      : time.getDay();      };
+
+/* Whole days from the epoch to a calendar date, counted in UTC so that a
+   daylight saving change cannot make the difference a fraction of a day.
+   'setUTCFullYear' rather than the Date constructor, as the latter reads a
+   year of 0-99 as 1900-1999. */
+const days_from_epoch = function(year, mon, mday) {
+    let d = new Date(0);
+    d.setUTCFullYear(year, mon, mday);
+    return Math.round(d.getTime() / 86400000);
+};
+
+/* Day of the year counting 1 January as 0, as C's 'tm_yday' does. */
+const get_yday = function(time, utc) {
+    let year = get_year(time, utc);
+    return days_from_epoch(year, get_mon(time, utc), get_mday(time, utc))
+         - days_from_epoch(year, 0, 1);
+};
+
+/* Local time only: true when the offset from UTC differs from the larger of
+   the two offsets this year, which is the standard-time one in either
+   hemisphere. Zones without daylight saving have a single offset and so
+   always answer false. */
+const get_isdst = function(time) {
+    let year = time.getFullYear();
+    let jan = new Date(year, 0, 1).getTimezoneOffset();
+    let jul = new Date(year, 6, 1).getTimezoneOffset();
+    return time.getTimezoneOffset() < (jan > jul ? jan : jul);
+};
+
 const setallfields = function(L, time, utc) {
-    setfield(L, "sec",   utc ? time.getUTCSeconds()  : time.getSeconds());
-    setfield(L, "min",   utc ? time.getUTCMinutes()  : time.getMinutes());
-    setfield(L, "hour",  utc ? time.getUTCHours()    : time.getHours());
-    setfield(L, "day",   utc ? time.getUTCDate()     : time.getDate());
-    setfield(L, "month", (utc ? time.getUTCMonth()   : time.getMonth()) + 1);
-    setfield(L, "year",  utc ? time.getUTCFullYear() : time.getFullYear());
-    setfield(L, "wday",  (utc ? time.getUTCDay()     : time.getDay()) + 1);
-    setfield(L, "yday", Math.floor((time - (new Date(time.getFullYear(), 0, 0 /* shortcut to correct day by one */))) / 86400000));
-    // setboolfield(L, "isdst", time.get);
+    setfield(L, "sec",   get_sec(time, utc));
+    setfield(L, "min",   get_min(time, utc));
+    setfield(L, "hour",  get_hour(time, utc));
+    setfield(L, "day",   get_mday(time, utc));
+    setfield(L, "month", get_mon(time, utc) + 1);
+    setfield(L, "year",  get_year(time, utc));
+    setfield(L, "wday",  get_wday(time, utc) + 1);
+    setfield(L, "yday",  get_yday(time, utc) + 1);  /* Lua counts 1 January as 1 */
+    setboolfield(L, "isdst", utc ? false : get_isdst(time));
 };
 
 const L_MAXDATEFIELD = (Number.MAX_SAFE_INTEGER / 2);
@@ -132,18 +176,17 @@ const locale = {
     }
 };
 
-const week_number = function(date, start_of_week) {
+const week_number = function(date, utc, start_of_week) {
     // This works by shifting the weekday back by one day if we
     // are treating Monday as the first day of the week.
-    let weekday = date.getDay();
+    let weekday = get_wday(date, utc);
     if (start_of_week === 'monday') {
         if (weekday === 0) // Sunday
             weekday = 6;
         else
             weekday--;
     }
-    let yday = (date - new Date(date.getFullYear(), 0, 1)) / 86400000;
-    return Math.floor((yday + 7 - weekday) / 7);
+    return Math.floor((get_yday(date, utc) + 7 - weekday) / 7);
 };
 
 const push_pad_2 = function(b, n, pad) {
@@ -152,7 +195,24 @@ const push_pad_2 = function(b, n, pad) {
     luaL_addstring(b, to_luastring(String(n)));
 };
 
-const strftime = function(L, b, s, date) {
+const UTC = to_luastring("UTC");
+
+/* The abbreviated name of the local zone, "EST" rather than "Eastern Standard
+   Time". Intl gives the abbreviation where one exists; the bracketed tail
+   of a Date's string form is the fallback for hosts without Intl. */
+const timezone_name = function(date) {
+    if (typeof Intl !== "undefined" && Intl.DateTimeFormat) {
+        let parts = new Intl.DateTimeFormat("en-US", {timeZoneName: "short"}).formatToParts(date);
+        for (let j = 0; j < parts.length; j++) {
+            if (parts[j].type === "timeZoneName")
+                return to_luastring(parts[j].value);
+        }
+    }
+    let m = date.toString().match(/\(([\w\s]+)\)/);
+    return m ? to_luastring(m[1]) : null;
+};
+
+const strftime = function(L, b, s, date, utc) {
     let i = 0;
     while (i < s.length) {
         if (s[i] !== 37 /* % */) {  /* not a conversion specifier? */
@@ -169,121 +229,121 @@ const strftime = function(L, b, s, date) {
 
                 // 'Thursday'
                 case 65 /* A */:
-                    luaL_addstring(b, locale.days[date.getDay()]);
+                    luaL_addstring(b, locale.days[get_wday(date, utc)]);
                     break;
 
                 // 'January'
                 case 66 /* B */:
-                    luaL_addstring(b, locale.months[date.getMonth()]);
+                    luaL_addstring(b, locale.months[get_mon(date, utc)]);
                     break;
 
                 // '19'
                 case 67 /* C */:
-                    push_pad_2(b, Math.floor(date.getFullYear() / 100), 48 /* 0 */);
+                    push_pad_2(b, Math.floor(get_year(date, utc) / 100), 48 /* 0 */);
                     break;
 
                 // '01/01/70'
                 case 68 /* D */:
-                    strftime(L, b, locale.formats.D, date);
+                    strftime(L, b, locale.formats.D, date, utc);
                     break;
 
                 // '1970-01-01'
                 case 70 /* F */:
-                    strftime(L, b, locale.formats.F, date);
+                    strftime(L, b, locale.formats.F, date, utc);
                     break;
 
                 // '00'
                 case 72 /* H */:
-                    push_pad_2(b, date.getHours(), 48 /* 0 */);
+                    push_pad_2(b, get_hour(date, utc), 48 /* 0 */);
                     break;
 
                 // '12'
                 case 73 /* I */:
-                    push_pad_2(b, (date.getHours() + 11) % 12 + 1, 48 /* 0 */);
+                    push_pad_2(b, (get_hour(date, utc) + 11) % 12 + 1, 48 /* 0 */);
                     break;
 
                 // '00'
                 case 77 /* M */:
-                    push_pad_2(b, date.getMinutes(), 48 /* 0 */);
+                    push_pad_2(b, get_min(date, utc), 48 /* 0 */);
                     break;
 
                 // 'am'
                 case 80 /* P */:
-                    luaL_addstring(b, date.getHours() < 12 ? locale.am : locale.pm);
+                    luaL_addstring(b, get_hour(date, utc) < 12 ? locale.am : locale.pm);
                     break;
 
                 // '00:00'
                 case 82 /* R */:
-                    strftime(L, b, locale.formats.R, date);
+                    strftime(L, b, locale.formats.R, date, utc);
                     break;
 
                 // '00'
                 case 83 /* S */:
-                    push_pad_2(b, date.getSeconds(), 48 /* 0 */);
+                    push_pad_2(b, get_sec(date, utc), 48 /* 0 */);
                     break;
 
                 // '00:00:00'
                 case 84 /* T */:
-                    strftime(L, b, locale.formats.T, date);
+                    strftime(L, b, locale.formats.T, date, utc);
                     break;
 
                 // '00'
                 case 85 /* U */:
-                    push_pad_2(b, week_number(date, "sunday"), 48 /* 0 */);
+                    push_pad_2(b, week_number(date, utc, "sunday"), 48 /* 0 */);
                     break;
 
                 // '00'
                 case 87 /* W */:
-                    push_pad_2(b, week_number(date, "monday"), 48 /* 0 */);
+                    push_pad_2(b, week_number(date, utc, "monday"), 48 /* 0 */);
                     break;
 
                 // '16:00:00'
                 case 88 /* X */:
-                    strftime(L, b, locale.formats.X, date);
+                    strftime(L, b, locale.formats.X, date, utc);
                     break;
 
                 // '1970'
                 case 89 /* Y */:
-                    luaL_addstring(b, to_luastring(String(date.getFullYear())));
+                    luaL_addstring(b, to_luastring(String(get_year(date, utc))));
                     break;
 
-                // 'GMT'
+                // 'UTC'
                 case 90 /* Z */: {
-                    let tzString = date.toString().match(/\(([\w\s]+)\)/);
+                    let tzString = utc ? UTC : timezone_name(date);
                     if (tzString)
-                        luaL_addstring(b, to_luastring(tzString[1]));
+                        luaL_addstring(b, tzString);
                     break;
                 }
 
                 // 'Thu'
                 case 97 /* a */:
-                    luaL_addstring(b, locale.shortDays[date.getDay()]);
+                    luaL_addstring(b, locale.shortDays[get_wday(date, utc)]);
                     break;
 
                 // 'Jan'
                 case 98 /* b */:
                 case 104 /* h */:
-                    luaL_addstring(b, locale.shortMonths[date.getMonth()]);
+                    luaL_addstring(b, locale.shortMonths[get_mon(date, utc)]);
                     break;
 
                 // ''
                 case 99 /* c */:
-                    strftime(L, b, locale.formats.c, date);
+                    strftime(L, b, locale.formats.c, date, utc);
                     break;
 
                 // '01'
                 case 100 /* d */:
-                    push_pad_2(b, date.getDate(), 48 /* 0 */);
+                    push_pad_2(b, get_mday(date, utc), 48 /* 0 */);
                     break;
 
                 // ' 1'
                 case 101 /* e */:
-                    push_pad_2(b, date.getDate(), 32 /* space */);
+                    push_pad_2(b, get_mday(date, utc), 32 /* space */);
                     break;
 
-                // '000'
+                // '001'
                 case 106 /* j */: {
-                    let yday = Math.floor((date - new Date(date.getFullYear(), 0, 1)) / 86400000);
+                    let yday = get_yday(date, utc) + 1;  /* '%j' counts 1 January as 1 */
                     if (yday < 100) {
                         if (yday < 10)
                             luaL_addchar(b, 48 /* 0 */);
@@ -295,17 +355,17 @@ const strftime = function(L, b, s, date) {
 
                 // ' 0'
                 case 107 /* k */:
-                    push_pad_2(b, date.getHours(), 32 /* space */);
+                    push_pad_2(b, get_hour(date, utc), 32 /* space */);
                     break;
 
                 // '12'
                 case 108 /* l */:
-                    push_pad_2(b, (date.getHours() + 11) % 12 + 1, 32 /* space */);
+                    push_pad_2(b, (get_hour(date, utc) + 11) % 12 + 1, 32 /* space */);
                     break;
 
                 // '01'
                 case 109 /* m */:
-                    push_pad_2(b, date.getMonth() + 1, 48 /* 0 */);
+                    push_pad_2(b, get_mon(date, utc) + 1, 48 /* 0 */);
                     break;
 
                 // '\n'
@@ -315,12 +375,12 @@ const strftime = function(L, b, s, date) {
 
                 // 'AM'
                 case 112 /* p */:
-                    luaL_addstring(b, date.getHours() < 12 ? locale.AM : locale.PM);
+                    luaL_addstring(b, get_hour(date, utc) < 12 ? locale.AM : locale.PM);
                     break;
 
                 // '12:00:00 AM'
                 case 114 /* r */:
-                    strftime(L, b, locale.formats.r, date);
+                    strftime(L, b, locale.formats.r, date, utc);
                     break;
 
                 // '0'
@@ -330,34 +390,34 @@ const strftime = function(L, b, s, date) {
 
                 // '\t'
                 case 116 /* t */:
-                    luaL_addchar(b, 8);
+                    luaL_addchar(b, 9);
                     break;
 
                 // '4'
                 case 117 /* u */: {
-                    let day = date.getDay();
+                    let day = get_wday(date, utc);
                     luaL_addstring(b, to_luastring(String(day === 0 ? 7 : day)));
                     break;
                 }
 
                 // '4'
                 case 119 /* w */:
-                    luaL_addstring(b, to_luastring(String(date.getDay())));
+                    luaL_addstring(b, to_luastring(String(get_wday(date, utc))));
                     break;
 
                 // '12/31/69'
                 case 120 /* x */:
-                    strftime(L, b, locale.formats.x, date);
+                    strftime(L, b, locale.formats.x, date, utc);
                     break;
 
                 // '70'
                 case 121 /* y */:
-                    push_pad_2(b, date.getFullYear() % 100, 48 /* 0 */);
+                    push_pad_2(b, get_year(date, utc) % 100, 48 /* 0 */);
                     break;
 
                 // '+0000'
                 case 122 /* z */: {
-                    let off = date.getTimezoneOffset();
+                    let off = utc ? 0 : date.getTimezoneOffset();
                     if (off > 0) {
                         luaL_addchar(b, 45 /* - */);
                     } else {
@@ -387,7 +447,7 @@ const checkoption = function(L, conv, i) {
         }
     }
     luaL_argerror(L, 1,
-        lua_pushfstring(L, to_luastring("invalid conversion specifier '%%%s'"), conv));
+        lua_pushfstring(L, to_luastring("invalid conversion specifier '%%%s'"), conv.subarray(i)));
 };
 
 /* maximum size for an individual 'strftime' item */
@@ -407,11 +467,9 @@ const os_date = function(L) {
         lua_createtable(L, 0, 9);  /* 9 = number of fields */
         setallfields(L, stm, utc);
     } else {
-        let cc = new Uint8Array(4);
-        cc[0] = "%".charCodeAt(0);
         let b = new luaL_Buffer();
         luaL_buffinit(L, b);
-        strftime(L, b, s, stm);
+        strftime(L, b, s.subarray(i), stm, utc);  /* subarray: the '!' is not part of the format */
         luaL_pushresult(b);
     }
     return 1;
